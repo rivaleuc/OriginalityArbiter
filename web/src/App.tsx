@@ -1,8 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { motion, AnimatePresence, useMotionValue, animate, useTransform } from 'framer-motion'
 import { Toaster, toast } from 'sonner'
-
-const CONTRACT = '0xEDf0e9B44b609f63aE17d1345C1e5dDF81000BdE'
+import { read, write, CONTRACT } from './genlayer'
 
 const SAMPLE = `The river does not hurry, yet it arrives. I have been thinking lately about the slow craft of sentences — how an idea, like silt, settles only when the current is allowed to rest. We write to discover what we did not know we believed.`
 
@@ -12,40 +11,6 @@ const ISSUE_STYLE: Record<Issue['kind'], { tag: string; dot: string; chip: strin
   plagiarism: { tag: 'PLAGIARISM', dot: '#B91C1C', chip: 'bg-red-50 text-red-700 border-red-200' },
   ai: { tag: 'AI-GENERATED', dot: '#B45309', chip: 'bg-amber-50 text-amber-700 border-amber-200' },
   citation: { tag: 'CITATION', dot: '#0D7377', chip: 'bg-teal-50 text-teal-700 border-teal-200' },
-}
-
-function scoreFor(text: string): { score: number; issues: Issue[] } {
-  let h = 0
-  for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) >>> 0
-  const words = text.trim().split(/\s+/).filter(Boolean).length
-  const base = 42 + (h % 56) // 42..97
-  const score = Math.max(8, Math.min(99, base - (words < 25 ? 14 : 0)))
-  const issues: Issue[] = []
-  if (score < 92)
-    issues.push({
-      id: 'ai',
-      kind: 'ai',
-      label: `${100 - score}% likely AI-assisted phrasing`,
-      detail: 'Perplexity dips in 2 passages suggest model-generated cadence.',
-      severity: 100 - score,
-    })
-  if (score < 75)
-    issues.push({
-      id: 'plag',
-      kind: 'plagiarism',
-      label: 'Near-duplicate fragment found',
-      detail: '1 sentence matches an indexed source at 86% similarity.',
-      severity: 80,
-    })
-  if (score < 88)
-    issues.push({
-      id: 'cite',
-      kind: 'citation',
-      label: 'Uncited paraphrase detected',
-      detail: 'Consider attributing the secondary claim in paragraph 1.',
-      severity: 40,
-    })
-  return { score, issues }
 }
 
 function Dial({ value, analyzing }: { value: number; analyzing: boolean }) {
@@ -110,9 +75,24 @@ function Dial({ value, analyzing }: { value: number; analyzing: boolean }) {
 export default function App() {
   const [text, setText] = useState(SAMPLE)
   const [analyzing, setAnalyzing] = useState(false)
-  const [result, setResult] = useState<{ score: number; issues: Issue[] } | null>(null)
+  const [result, setResult] = useState<{ score: number; issues: Issue[]; isOriginal: boolean } | null>(null)
   const [phase, setPhase] = useState('')
+  const [stats, setStats] = useState<{ total: number; rewarded: number; rejected: number } | null>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    read('stats')
+      .then((s: any) =>
+        setStats({
+          total: Number(s?.total_submissions ?? s?.[0] ?? 0),
+          rewarded: Number(s?.rewarded ?? s?.[1] ?? 0),
+          rejected: Number(s?.rejected ?? s?.[2] ?? 0),
+        }),
+      )
+      .catch(() => {
+        /* keep masthead fallback on read failure */
+      })
+  }, [])
 
   const words = useMemo(() => text.trim().split(/\s+/).filter(Boolean).length, [text])
   const chars = text.length
@@ -129,56 +109,101 @@ export default function App() {
     return () => clearInterval(t)
   }, [analyzing])
 
-  function analyze() {
+  async function analyze() {
     if (words < 8) {
       toast.error('Need more text', { description: 'Paste at least 8 words to score originality.' })
       return
     }
     setAnalyzing(true)
     setResult(null)
-    toast('Arbiter engaged', { description: `Analyzing ${words} words…` })
-    setTimeout(() => {
-      const r = scoreFor(text)
-      setResult(r)
+    toast('Arbiter engaged', { description: `Submitting ${words} words on-chain…` })
+    try {
+      await write('submit', [text, 'article', ''])
+      const s: any = await read('stats')
+      const totalSubs = Number(s?.total_submissions ?? s?.[0] ?? 0)
+      setStats({
+        total: totalSubs,
+        rewarded: Number(s?.rewarded ?? s?.[1] ?? 0),
+        rejected: Number(s?.rejected ?? s?.[2] ?? 0),
+      })
+
+      const sub: any = await read('get_submission', [String(totalSubs - 1)])
+      const rawScore = Number(sub?.originality_score ?? sub?.[0] ?? 0)
+      const score = Math.max(0, Math.min(100, Math.round(rawScore <= 1 ? rawScore * 100 : rawScore)))
+      const isOriginal = Boolean(sub?.is_original ?? sub?.[1])
+      const reasoning = String(sub?.reasoning ?? sub?.[2] ?? '')
+      const similar = sub?.similar_sources ?? sub?.[3] ?? []
+
+      const issues: Issue[] = []
+      if (reasoning)
+        issues.push({
+          id: 'reason',
+          kind: isOriginal ? 'citation' : 'ai',
+          label: isOriginal ? 'Validator assessment' : 'Originality concern',
+          detail: reasoning,
+          severity: Math.max(1, 100 - score),
+        })
+      if (Array.isArray(similar))
+        similar.forEach((src: any, i: number) =>
+          issues.push({
+            id: `sim${i}`,
+            kind: 'plagiarism',
+            label: 'Similar source found',
+            detail: String(src),
+            severity: 80,
+          }),
+        )
+
+      setResult({ score, issues, isOriginal })
+      if (isOriginal)
+        toast.success('Original work verified', { description: 'Eligible for author token reward.' })
+      else toast.warning('Originality below threshold', { description: reasoning || 'Review flagged issues.' })
+    } catch (e: any) {
+      toast.error('Analysis failed', { description: e?.message ?? String(e) })
+    } finally {
       setAnalyzing(false)
-      if (r.score >= 80) toast.success('Original work verified', { description: 'Eligible for author token reward.' })
-      else if (r.score >= 55) toast.warning('Derivative content', { description: 'Partial reward — review flagged issues.' })
-      else toast.error('Originality below threshold', { description: 'Not eligible for reward.' })
-    }, 3000)
+    }
   }
 
   const score = result?.score ?? 0
-  const eligible = score >= 80
-  const partial = score >= 55 && score < 80
+  const isOriginal = result?.isOriginal ?? false
+  const eligible = isOriginal
+  const partial = !isOriginal && score >= 55
 
   return (
-    <div className="min-h-screen bg-[#FFFDF7] text-[#1C1A17]">
+    <div className="min-h-screen bg-[#FBF8F0] text-[#1C1A17]">
       <Toaster position="top-center" richColors />
+      {/* paper grain + warm vignette */}
+      <div className="pointer-events-none fixed inset-0" style={{ background: 'radial-gradient(ellipse 80% 50% at 50% -10%, rgba(13,115,119,0.07), transparent 70%)' }} />
+      <div className="pointer-events-none fixed inset-0 opacity-[0.03]" style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E\")" }} />
+
+      {/* top accent rule */}
+      <div className="relative h-1 w-full bg-gradient-to-r from-[#0D7377] via-[#14A085] to-[#0D7377]" />
+
       {/* masthead */}
-      <header className="border-b border-stone-200">
-        <div className="mx-auto flex max-w-6xl items-end justify-between px-6 py-5">
-          <div>
-            <div className="flex items-center gap-2 text-[#0D7377]">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
-                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
-              </svg>
-              <span className="text-xs font-semibold uppercase tracking-[0.35em]">Originality Arbiter</span>
-            </div>
-            <h1 className="mt-1 font-serif text-2xl font-semibold tracking-tight sm:text-3xl">
-              The ledger that rewards <span className="italic text-[#0D7377]">original</span> voices.
-            </h1>
+      <header className="relative border-b border-stone-300/70">
+        <div className="mx-auto max-w-6xl px-6">
+          <div className="flex items-center justify-center gap-3 border-b border-dashed border-stone-300/60 py-2.5 text-[10px] uppercase tracking-[0.3em] text-stone-400">
+            <span>Est. on GenLayer</span><span className="text-[#0D7377]">◆</span>
+            <span>Decentralized Authorship Ledger</span><span className="text-[#0D7377]">◆</span>
+            <span className="hidden sm:inline">{stats ? `${stats.total} entries` : 'Vol. I'}</span>
           </div>
-          <div className="hidden text-right font-mono text-[10px] leading-relaxed text-stone-400 sm:block">
-            <div>CONTRACT</div>
-            <div className="text-stone-500">
-              {CONTRACT.slice(0, 10)}…{CONTRACT.slice(-6)}
+          <div className="flex flex-col items-center py-7 text-center">
+            <div className="mb-2 flex items-center gap-2 text-[#0D7377]">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+              <span className="text-[11px] font-semibold uppercase tracking-[0.4em]">Originality Arbiter</span>
             </div>
+            <h1 className="max-w-3xl font-serif text-4xl font-semibold leading-[1.1] tracking-tight sm:text-5xl">
+              The ledger that rewards<br/><span className="italic text-[#0D7377]">original</span> voices.
+            </h1>
+            <p className="mt-3 max-w-md font-serif text-[15px] italic leading-relaxed text-stone-500">
+              Paste your writing. AI validators judge its originality and reward authentic authorship on-chain.
+            </p>
           </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-6xl px-6 py-8">
+      <main className="relative mx-auto max-w-6xl px-6 py-8">
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1.4fr_1fr]">
           {/* editor */}
           <section className="overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-[0_1px_0_rgba(0,0,0,0.02),0_12px_40px_-24px_rgba(13,115,119,0.4)]">
