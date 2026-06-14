@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { motion, AnimatePresence, useMotionValue, animate, useTransform } from 'framer-motion'
 import { Toaster, toast } from 'sonner'
-import { read, write, CONTRACT } from './genlayer'
+import { read, write, CONTRACT, connectWallet, isWalletConnected } from './genlayer'
 
 const SAMPLE = `The river does not hurry, yet it arrives. I have been thinking lately about the slow craft of sentences — how an idea, like silt, settles only when the current is allowed to rest. We write to discover what we did not know we believed.`
 
@@ -78,7 +78,18 @@ export default function App() {
   const [result, setResult] = useState<{ score: number; issues: Issue[]; isOriginal: boolean } | null>(null)
   const [phase, setPhase] = useState('')
   const [stats, setStats] = useState<{ total: number; rewarded: number; rejected: number } | null>(null)
+  const [walletAddr, setWalletAddr] = useState<string | null>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
+
+  async function handleConnect() {
+    try {
+      const a = await connectWallet()
+      setWalletAddr(a.slice(0, 6) + '…' + a.slice(-4))
+      toast.success('Wallet connected')
+    } catch (e: any) {
+      toast.error(e.message || 'Connect failed')
+    }
+  }
 
   useEffect(() => {
     read('stats')
@@ -182,6 +193,16 @@ export default function App() {
 
       {/* masthead */}
       <header className="relative border-b border-stone-300/70">
+        <button
+          onClick={handleConnect}
+          className={`absolute right-4 top-4 z-10 rounded-full border px-4 py-1.5 font-serif text-xs font-semibold tracking-wide transition ${
+            isWalletConnected()
+              ? 'border-[#0D7377]/40 bg-[#0D7377]/10 text-[#0D7377]'
+              : 'border-stone-300 text-stone-600 hover:border-[#0D7377]/50 hover:text-[#0D7377]'
+          }`}
+        >
+          {walletAddr ? `◆ ${walletAddr}` : 'Connect Wallet'}
+        </button>
         <div className="mx-auto max-w-6xl px-6">
           <div className="flex items-center justify-center gap-3 border-b border-dashed border-stone-300/60 py-2.5 text-[10px] uppercase tracking-[0.3em] text-stone-400">
             <span>Est. on GenLayer</span><span className="text-[#0D7377]">◆</span>
