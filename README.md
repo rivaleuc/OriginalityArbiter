@@ -34,15 +34,6 @@ Content platforms need moderation. Centralized moderation doesn't scale and is b
 - **GenLayer (Bradbury):** `0xEDf0e9B44b609f63aE17d1345C1e5dDF81000BdE`
 - **Network:** Bradbury Testnet (chain 4221)
 
-## Test results
-
-| Content | Score | Verdict | Reasoning |
-|---------|-------|---------|-----------|
-| Marketing-style GenLayer description | 35 | ❌ Rejected | Reads as promotional material or AI-generated summary |
-| Personal anecdote about blockchain + grandma | 95 | ✅ Original | Unique voice, novel concept, no plagiarism detected |
-
-Both screenings: 5/5 validators AGREE.
-
 ## Architecture
 
 - `genlayer/` — Intelligent contract: content submission, AI originality judgment, appeal
