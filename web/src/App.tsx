@@ -75,7 +75,7 @@ function Dial({ value, analyzing }: { value: number; analyzing: boolean }) {
 export default function App() {
   const [text, setText] = useState(SAMPLE)
   const [analyzing, setAnalyzing] = useState(false)
-  const [result, setResult] = useState<{ score: number; issues: Issue[]; isOriginal: boolean } | null>(null)
+  const [result, setResult] = useState<{ score: number; issues: Issue[]; isOriginal: boolean; key: string } | null>(null)
   const [phase, setPhase] = useState('')
   const [stats, setStats] = useState<{ total: number; rewarded: number; rejected: number } | null>(null)
   const [walletAddr, setWalletAddr] = useState<string | null>(null)
@@ -138,7 +138,8 @@ export default function App() {
         rejected: Number(s?.rejected ?? s?.[2] ?? 0),
       })
 
-      const sub: any = await read('get_submission', [String(totalSubs - 1)])
+      const subKey = String(totalSubs - 1)
+      const sub: any = await read('get_submission', [subKey])
       const rawScore = Number(sub?.originality_score ?? sub?.[0] ?? 0)
       const score = Math.max(0, Math.min(100, Math.round(rawScore <= 1 ? rawScore * 100 : rawScore)))
       const isOriginal = Boolean(sub?.is_original ?? sub?.[1])
@@ -165,7 +166,7 @@ export default function App() {
           }),
         )
 
-      setResult({ score, issues, isOriginal })
+      setResult({ score, issues, isOriginal, key: subKey })
       if (isOriginal)
         toast.success('Original work verified', { description: 'Eligible for author token reward.' })
       else toast.warning('Originality below threshold', { description: reasoning || 'Review flagged issues.' })
@@ -180,6 +181,26 @@ export default function App() {
   const isOriginal = result?.isOriginal ?? false
   const eligible = isOriginal
   const partial = !isOriginal && score >= 55
+
+  async function verifyEligibility() {
+    if (!result) return
+    try {
+      const elig: any = await read('read_reward_eligibility', [result.key])
+      const ok = Boolean(elig?.eligible ?? elig?.[0])
+      const onchainScore = Number(elig?.score ?? elig?.[2] ?? result.score)
+      const author = String(elig?.author ?? elig?.[1] ?? '')
+      if (ok)
+        toast.success('Reward eligibility confirmed on-chain', {
+          description: `Author ${author ? author.slice(0, 6) + '…' + author.slice(-4) : 'unknown'} · score ${onchainScore}/100`,
+        })
+      else
+        toast.error('Not eligible on-chain', {
+          description: 'This submission did not clear the originality threshold.',
+        })
+    } catch (e: any) {
+      toast.error('Eligibility check failed', { description: e?.message ?? String(e) })
+    }
+  }
 
   return (
     <div className="min-h-screen bg-[#FBF8F0] text-[#1C1A17]">
@@ -392,7 +413,7 @@ export default function App() {
               </div>
               <button
                 disabled={!eligible && !partial}
-                onClick={() => toast.success('Reward claimed', { description: 'Tokens routed to author wallet.' })}
+                onClick={verifyEligibility}
                 className={`rounded-lg px-6 py-2.5 font-serif text-sm font-semibold transition ${
                   eligible
                     ? 'bg-white text-[#0D7377] hover:bg-stone-100'
@@ -401,7 +422,7 @@ export default function App() {
                       : 'cursor-not-allowed bg-red-200 text-red-500'
                 }`}
               >
-                Claim reward
+                Verify eligibility
               </button>
             </motion.div>
           )}

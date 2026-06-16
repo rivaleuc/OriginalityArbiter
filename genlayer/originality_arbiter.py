@@ -7,6 +7,58 @@ MAX_WEB_EVIDENCE = 5000
 PLAGIARISM_THRESHOLD = 40  # below this score = not original enough
 
 
+# ----------------------------------------------------------------------
+# Pure deterministic helpers (no LLM / no I/O) — unit-testable and used by
+# both the leader (to derive a passing verdict) and validators (to recompute
+# the cross-field invariant). NEVER compare free-form LLM text here.
+# ----------------------------------------------------------------------
+
+def _coerce_int(value, default: int = 0) -> int:
+    """Best-effort int coercion that rejects bools."""
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def normalize_originality_verdict(data: dict) -> dict:
+    """Clamp the score to [0,100] and DERIVE is_original from it so honest
+    leaders always satisfy the validator invariant. Reasoning is forced
+    non-empty so the normalized output is always valid."""
+    score = max(0, min(100, _coerce_int(data.get("originality_score"), 0)))
+    reasoning = str(data.get("reasoning") or "").strip() or "no reasoning provided"
+    similar = str(data.get("similar_sources") or "").strip() or "none found"
+    return {
+        "originality_score": score,
+        "is_original": bool(score >= PLAGIARISM_THRESHOLD),
+        "reasoning": reasoning,
+        "similar_sources": similar,
+    }
+
+
+def validate_originality_verdict(data: dict) -> bool:
+    """Deterministic anchor: score range + is_original == (score >= threshold)
+    + non-empty reasoning. Recomputed identically by every validator."""
+    score = data.get("originality_score")
+    if not isinstance(score, int) or isinstance(score, bool):
+        return False
+    if score < 0 or score > 100:
+        return False
+    is_original = data.get("is_original")
+    if not isinstance(is_original, bool):
+        return False
+    if is_original != (score >= PLAGIARISM_THRESHOLD):
+        return False
+    reasoning = data.get("reasoning")
+    if not isinstance(reasoning, str) or not reasoning.strip():
+        return False
+    return True
+
+
 class OriginalityArbiter(gl.Contract):
     owner: str
     submissions: TreeMap[str, str]  # key -> JSON record
@@ -129,23 +181,16 @@ Reply ONLY valid JSON:
 No markdown, no code fences."""
 
             raw = gl.nondet.exec_prompt(prompt, response_format="json")
-            if isinstance(raw, dict):
-                return json.dumps(raw)
-            return str(raw).strip()
+            data = raw if isinstance(raw, dict) else json.loads(str(raw).strip())
+            # Derive the invariant in the leader so honest leaders always pass.
+            return json.dumps(normalize_originality_verdict(data))
 
         def validator_fn(leader_result) -> bool:
             if not isinstance(leader_result, gl.vm.Return):
                 return False
             try:
                 data = json.loads(leader_result.calldata)
-                score = data.get("originality_score")
-                if not isinstance(score, int) or score < 0 or score > 100:
-                    return False
-                if not isinstance(data.get("is_original"), bool):
-                    return False
-                if not isinstance(data.get("reasoning"), str):
-                    return False
-                return True
+                return validate_originality_verdict(data)
             except Exception:
                 return False
 
